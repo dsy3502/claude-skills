@@ -1,3 +1,8 @@
+---
+name: ones-wiki
+description: Upload and update ONES wiki pages from local markdown files. Use when the user wants to upload markdown to ONES wiki, update an existing ONES page, list wiki spaces or pages, or import documentation into ONES at ones.datacanvas.com.
+---
+
 # ONES Wiki Skill
 
 Upload and update ONES wiki pages from local markdown files.
