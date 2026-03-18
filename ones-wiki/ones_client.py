@@ -60,18 +60,20 @@ def get_credentials():
     ones_token = os.environ.get("ONES_TOKEN") or cfg.get("ones_token", "")
     user_uuid = os.environ.get("ONES_USER_UUID") or cfg.get("user_uuid", "")
     org_uuid = os.environ.get("ONES_ORG_UUID") or cfg.get("org_uuid", "")
+    # team_uuid is used in wiki API paths (may differ from org_uuid)
+    team_uuid = os.environ.get("ONES_TEAM_UUID") or cfg.get("team_uuid", "") or org_uuid
     # Open API v2 (PAT)
     bearer_pat = os.environ.get("ONES_PAT") or cfg.get("bearer_pat", "")
-    return host, ones_token, user_uuid, org_uuid, bearer_pat
+    return host, ones_token, user_uuid, org_uuid, team_uuid, bearer_pat
 
 
 def has_classic_auth():
-    _, ones_token, user_uuid, org_uuid, _ = get_credentials()
-    return bool(ones_token and user_uuid and org_uuid)
+    _, ones_token, user_uuid, _, team_uuid, _ = get_credentials()
+    return bool(ones_token and user_uuid and team_uuid)
 
 
 def has_pat_auth():
-    _, _, _, org_uuid, bearer_pat = get_credentials()
+    _, _, _, org_uuid, _, bearer_pat = get_credentials()
     return bool(bearer_pat and org_uuid)
 
 
@@ -79,7 +81,7 @@ def has_pat_auth():
 
 def api_request_classic(method, path, body=None):
     """Classic ONES REST API using Ones-Auth-Token + Ones-User-Id."""
-    host, ones_token, user_uuid, _, _ = get_credentials()
+    host, ones_token, user_uuid, _, _, _ = get_credentials()
     url = f"{host}{path}"
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {
@@ -105,7 +107,7 @@ def api_request_classic(method, path, body=None):
 
 def api_request_openapi(method, path, body=None, params=None):
     """ONES Open API v2 using Bearer PAT token."""
-    host, _, _, org_uuid, bearer_pat = get_credentials()
+    host, _, _, org_uuid, _, bearer_pat = get_credentials()
     qs = f"?teamID={org_uuid}"
     if params:
         for k, v in params.items():
@@ -134,8 +136,7 @@ def api_request_openapi(method, path, body=None, params=None):
 
 def api_request_openapi_multipart(path, fields):
     """POST multipart/form-data to ONES Open API v2."""
-    import email.mime.multipart
-    host, _, _, org_uuid, bearer_pat = get_credentials()
+    host, _, _, org_uuid, _, bearer_pat = get_credentials()
     url = f"{host}{path}?teamID={org_uuid}"
 
     boundary = "----ONESBoundary" + os.urandom(8).hex()
@@ -173,53 +174,55 @@ def api_request_openapi_multipart(path, fields):
 
 def cmd_login(email, password):
     """Login with email/password → saves Ones-Auth-Token for classic API."""
-    host, _, _, _, _ = get_credentials()
-    # First get org_uuid from email
+    host, _, _, _, _, _ = get_credentials()
+    # Temporarily clear token so request goes unauthenticated
+    cfg_temp = load_config()
+    cfg_temp_token = cfg_temp.get("ones_token", "")
+    cfg_temp["ones_token"] = ""
+    cfg_temp["user_uuid"] = ""
+    save_config(cfg_temp)
+
     result = api_request_classic("POST", "/project/api/project/auth/login", {
         "email": email,
         "password": password,
     })
-    # result shape: {"user": {"uuid": ..., "name": ...}, "user_uuid": ..., "token": ...}
-    # The login may return the team list in a different field
-    token = result.get("token", "")
+
+    # Response shape: {"user": {"uuid": ..., "token": ..., ...}, "teams": [...], "org": {...}}
     user = result.get("user", {})
-    user_uuid = result.get("user_uuid") or user.get("uuid", "")
+    token = user.get("token", "") or result.get("token", "")
+    user_uuid = user.get("uuid", "") or result.get("user_uuid", "")
 
     if not token:
         print("Login failed: no token in response.", file=sys.stderr)
         print(f"Response: {json.dumps(result, indent=2)}", file=sys.stderr)
         sys.exit(1)
 
-    # Get org_uuid from team list
-    org_uuid = ""
-    teams_result = {}
-    try:
-        # Use the token we just got for this request
-        cfg_temp = load_config()
-        cfg_temp.update({"ones_token": token, "user_uuid": user_uuid})
-        save_config(cfg_temp)
-        teams_result = api_request_classic("GET", "/project/api/project/teams")
-        teams = teams_result if isinstance(teams_result, list) else teams_result.get("teams", [])
-        if teams and isinstance(teams[0], dict):
-            org_uuid = teams[0].get("uuid", "")
-        elif teams and isinstance(teams[0], str):
-            org_uuid = teams[0]
-    except Exception:
-        pass
+    # Extract team UUID (used in wiki API path) from teams list
+    teams = result.get("teams", [])
+    team_uuid = ""
+    if teams and isinstance(teams[0], dict):
+        team_uuid = teams[0].get("uuid", "")
+    elif teams and isinstance(teams[0], str):
+        team_uuid = teams[0]
 
-    if not org_uuid:
-        org_uuid = input("Enter your team/org UUID: ").strip()
+    # Also keep org_uuid for Open API v2
+    org_uuid = result.get("org", {}).get("uuid", "") or team_uuid
+
+    if not team_uuid:
+        team_uuid = input("Enter your team UUID (from browser URL): ").strip()
 
     cfg = load_config()
     cfg.update({
         "host": host,
         "ones_token": token,
         "user_uuid": user_uuid,
-        "org_uuid": org_uuid,
+        "org_uuid": org_uuid,   # org-level UUID (QnDrfu1P)
+        "team_uuid": team_uuid, # team-level UUID (Aozd1Seg) used in wiki API
     })
     save_config(cfg)
     print(f"Login successful.")
     print(f"  user_uuid : {user_uuid}")
+    print(f"  team_uuid : {team_uuid}")
     print(f"  org_uuid  : {org_uuid}")
     print(f"  host      : {host}")
 
@@ -229,7 +232,7 @@ def cmd_set_token(pat_token, org_uuid=None):
     cfg = load_config()
 
     if not org_uuid:
-        org_uuid = cfg.get("org_uuid", "")
+        org_uuid = cfg.get("org_uuid", "") or cfg.get("team_uuid", "")
     if not org_uuid:
         print("Enter your ONES team/org UUID (visible in browser URL: /wiki/#/space/XXXXX)")
         org_uuid = input("org_uuid: ").strip()
@@ -249,12 +252,16 @@ def cmd_set_token(pat_token, org_uuid=None):
 
 
 def cmd_list_spaces():
-    host, _, _, org_uuid, _ = get_credentials()
+    host, _, _, org_uuid, team_uuid, _ = get_credentials()
 
     if has_classic_auth():
-        result = api_request_classic("GET",
-                                     f"/wiki/api/wiki/team/{org_uuid}/spaces")
-        spaces = result.get("spaces", result if isinstance(result, list) else [])
+        # Use GraphQL endpoint (list-spaces REST requires AdministerWiki)
+        result = api_request_classic(
+            "POST",
+            f"/wiki/api/wiki/team/{team_uuid}/items/graphql",
+            body={"query": "{ spaces(filter: {}) { uuid name } }", "variables": {}}
+        )
+        spaces = result.get("data", {}).get("spaces", [])
     elif has_pat_auth():
         result = api_request_openapi("GET", "/openapi/v2/wiki/spaces")
         spaces = result.get("spaces", result if isinstance(result, list) else [])
@@ -265,21 +272,21 @@ def cmd_list_spaces():
     if not spaces:
         print("No spaces found.")
         return []
-    print(f"{'UUID':<36}  Title")
-    print("-" * 70)
+    print(f"{'UUID':<12}  Name")
+    print("-" * 60)
     for s in spaces:
         uuid = s.get("uuid", s.get("id", ""))
-        title = s.get("title", s.get("name", ""))
-        print(f"{uuid:<36}  {title}")
+        title = s.get("name", s.get("title", ""))
+        print(f"{uuid:<12}  {title}")
     return spaces
 
 
 def cmd_list_pages(space_uuid):
-    host, _, _, org_uuid, _ = get_credentials()
+    host, _, _, org_uuid, team_uuid, _ = get_credentials()
 
     if has_classic_auth():
         result = api_request_classic("GET",
-                                     f"/wiki/api/wiki/team/{org_uuid}/space/{space_uuid}/pages?status=normal")
+                                     f"/wiki/api/wiki/team/{team_uuid}/space/{space_uuid}/pages?status=normal")
         pages = result.get("pages", result if isinstance(result, list) else [])
     elif has_pat_auth():
         result = api_request_openapi("GET", f"/openapi/v2/wiki/spaces/{space_uuid}/pages")
@@ -308,7 +315,7 @@ def cmd_list_pages(space_uuid):
 
 
 def cmd_upload(md_file, space_uuid, parent_uuid=None, title=None):
-    host, _, _, org_uuid, _ = get_credentials()
+    host, _, _, org_uuid, team_uuid, _ = get_credentials()
     md_path = Path(md_file)
     if not md_path.exists():
         print(f"File not found: {md_file}", file=sys.stderr)
@@ -327,7 +334,7 @@ def cmd_upload(md_file, space_uuid, parent_uuid=None, title=None):
             "status": 1,
         }
         result = api_request_classic("POST",
-                                     f"/wiki/api/wiki/team/{org_uuid}/space/{space_uuid}/pages/add",
+                                     f"/wiki/api/wiki/team/{team_uuid}/space/{space_uuid}/pages/add",
                                      body=body)
         page = result.get("page", result)
         page_uuid = page.get("uuid", "")
@@ -360,7 +367,7 @@ def cmd_upload(md_file, space_uuid, parent_uuid=None, title=None):
 
 
 def cmd_update(md_file, page_uuid):
-    _, _, _, org_uuid, _ = get_credentials()
+    _, _, _, org_uuid, team_uuid, _ = get_credentials()
     host = load_config().get("host", ONES_HOST)
 
     if not has_classic_auth():
@@ -375,7 +382,7 @@ def cmd_update(md_file, page_uuid):
         sys.exit(1)
 
     current = api_request_classic("GET",
-                                   f"/wiki/api/wiki/team/{org_uuid}/page/{page_uuid}")
+                                   f"/wiki/api/wiki/team/{team_uuid}/page/{page_uuid}")
     page_info = current.get("page", current)
     space_uuid = page_info.get("space_uuid", "")
 
@@ -385,7 +392,7 @@ def cmd_update(md_file, page_uuid):
 
     body = {"title": page_title, "content": content, "status": 1}
     api_request_classic("POST",
-                         f"/wiki/api/wiki/team/{org_uuid}/page/{page_uuid}/update",
+                         f"/wiki/api/wiki/team/{team_uuid}/page/{page_uuid}/update",
                          body=body)
     print(f"Page updated: {page_title}")
     print(f"  UUID : {page_uuid}")
