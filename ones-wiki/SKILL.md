@@ -12,32 +12,46 @@ Use this skill when the user wants to:
 - List ONES wiki spaces or pages
 - Import documentation into ONES
 
-## Setup (First Use)
+## Authentication
 
-The skill uses a Python client script located at:
-```
-~/.claude/skills/ones-wiki/ones_client.py
-```
+There are two authentication modes. **Classic API** (email/password) is recommended
+for full functionality including page updates.
 
-Credentials are stored in `~/.claude/skills/ones-wiki/.ones_config.json` (chmod 600).
+### Mode 1: Classic API — Full Features (recommended)
 
-### Step 1: Login
+Login with email/password. Supports: list spaces, list pages, create page, **update page**.
 
 ```bash
-python ~/.claude/skills/ones-wiki/ones_client.py login --email YOUR_EMAIL --password YOUR_PASSWORD
+python ~/.claude/skills/ones-wiki/ones_client.py login \
+  --email your@email.com --password yourpassword
 ```
 
-This saves token, user_id, and team_uuid to config. **Only needed once.**
+This saves `Ones-Auth-Token` to config. Only needed once until token expires.
 
-### Step 2: Get your Space UUID
+### Mode 2: Open API v2 — Bearer PAT (no update support)
+
+Generate a Personal Access Token (PAT) from ONES profile:
+1. Log into ONES → click profile avatar → Developer Settings → Personal Access Tokens
+2. Generate a new token, copy it
+3. Run:
+
+```bash
+python ~/.claude/skills/ones-wiki/ones_client.py set-token YOUR_PAT_TOKEN --org TEAM_UUID
+```
+
+The `TEAM_UUID` (org_uuid) appears in your browser URL: `ones.datacanvas.com/wiki/#/space/XXXXXXXX/...`
+Take the 8-character ID from the URL.
+
+**Important**: The PAT from developer settings is NOT the same as the JWT you see in browser
+devtools. The ONES REST API does not accept browser session JWTs.
+
+## Commands
+
+### List spaces
 
 ```bash
 python ~/.claude/skills/ones-wiki/ones_client.py list-spaces
 ```
-
-Copy the UUID of the target space.
-
-## Commands
 
 ### Upload a new page
 
@@ -49,7 +63,7 @@ Options:
 - `--title "Custom Title"` — override title (default: filename)
 - `--parent <page_uuid>` — make it a sub-page
 
-### Update an existing page
+### Update an existing page (classic API only)
 
 ```bash
 python ~/.claude/skills/ones-wiki/ones_client.py update <file.md> --page <page_uuid>
@@ -73,26 +87,16 @@ When the user says things like "upload README.md to ONES" or "update the ONES pa
    - Run `upload` command
 
 3. **If updating existing page**:
+   - Requires classic API (email/password login)
    - Ask for the page UUID, or run `list-pages --space <uuid>` to find it
    - Run `update` command
 
 4. **Show result**: Display the page URL after success.
 
-## Environment Variables (alternative to config file)
-
-```bash
-export ONES_HOST=https://ones.datacanvas.com
-export ONES_EMAIL=your@email.com
-export ONES_PASSWORD=yourpassword
-# OR after first login:
-export ONES_TOKEN=your_token
-export ONES_USER_ID=your_user_id
-export ONES_TEAM_UUID=your_team_uuid
-```
-
 ## Notes
 
-- Content is converted from Markdown to HTML automatically
+- **Classic API**: content is converted Markdown → HTML automatically
+- **Open API v2 (PAT)**: content uses ONES Wiz editor block format
 - Supports: headings, bold, italic, code blocks, lists, blockquotes, links
 - Page title defaults to the filename (spaces-and-underscores → Title Case)
-- Config file is saved with 600 permissions (user-readable only)
+- Config stored at `~/.claude/skills/ones-wiki/.ones_config.json` (chmod 600)
